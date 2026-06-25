@@ -30,7 +30,7 @@ from typing import Any, Optional
 # Resolve the multi-weixin source directory
 _MULTI_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    "..", "..", "..", "opt", "hermes-weixin-multi"
+    "..", "..", "..", "..", "opt", "hermes-weixin-multi"
 )
 _MULTI_DIR = os.path.realpath(_MULTI_DIR)
 
@@ -48,18 +48,27 @@ def check_requirements() -> bool:
 
 
 def validate_config(config: Any) -> bool:
+    """Validate config: True if platform is enabled (even without accounts).
+    
+    Accounts can be added dynamically via /wechat-login, so we don't require
+    pre-configured accounts. Just check that weixin_multi is enabled.
+    """
+    enabled = getattr(config, "enabled", False)
+    if not enabled:
+        return False
+    
+    # Check if there are pre-configured accounts (optional)
     extra = getattr(config, "extra", {}) or {}
     accounts = extra.get("accounts", {})
-    if isinstance(accounts, dict) and accounts:
-        return any(
-            (a.get("token") or a.get("access_token") or "").strip()
-            for a in accounts.values()
-        )
-    if os.getenv("WEIXIN_MULTI_TOKEN") or os.getenv("WEIXIN_TOKEN"):
+    if isinstance(accounts, dict) and accounts and any(
+        (a.get("token") or a.get("access_token") or "").strip()
+        for a in accounts.values()
+    ):
         return True
-    if getattr(config, "token", ""):
-        return True
-    return False
+    
+    # Even without pre-configured accounts, still valid — accounts
+    # will be added via /wechat-login from any channel.
+    return True
 
 
 def _env_enablement() -> Optional[dict]:
