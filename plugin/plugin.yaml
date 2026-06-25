@@ -1,0 +1,32 @@
+name: weixin-multi
+label: Weixin Multi
+kind: platform
+version: 0.1.0
+description: >
+  Multi-account Weixin/WeChat adapter for Hermes Agent.
+  Supports multiple WeChat accounts simultaneously, each with independent
+  polling, session management, and media sending. Forked from the built-in
+  weixin adapter with concurrency fixes and multi-account support.
+author: hyonex
+requires_env:
+  - name: WEIXIN_MULTI_TOKEN
+    description: "iLink Bot API token (for legacy single-account mode)"
+    prompt: "Weixin Multi token"
+    password: true
+optional_env:
+  - name: WEIXIN_MULTI_ACCOUNT_ID
+    description: "Account ID for legacy single-account mode (default: default)"
+    prompt: "Account ID"
+    password: false
+  - name: WEIXIN_MULTI_DM_POLICY
+    description: "DM policy: open, allowlist, or disabled (default: open)"
+    prompt: "DM policy"
+    password: false
+  - name: WEIXIN_MULTI_ALLOWED_USERS
+    description: "Comma-separated user IDs allowed to talk to the bot"
+    prompt: "Allowed user IDs"
+    password: false
+  - name: WEIXIN_MULTI_BASE_URL
+    description: "iLink API base URL (default: https://ilinkai.weixin.qq.com)"
+    prompt: "API base URL"
+    password: false
