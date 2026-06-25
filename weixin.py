@@ -1461,10 +1461,11 @@ class WeixinMultiAdapter(BasePlatformAdapter):
             return False
 
         if not self._accounts:
-            message = "Weixin startup failed: no accounts configured"
-            self._set_fatal_error("weixin_no_accounts", message, retryable=False)
-            logger.warning("[%s] %s", self.name, message)
-            return False
+            # No accounts yet — this is fine. Accounts will be added
+            # dynamically via /wechat-login from any channel.
+            logger.info("[%s] No accounts configured yet; waiting for /wechat-login", self.name)
+            self._mark_connected()
+            return True
 
         # Initialize sessions for each account and start polling
         _no_aiohttp_timeout = aiohttp.ClientTimeout(total=None, connect=None, sock_connect=None, sock_read=None)
