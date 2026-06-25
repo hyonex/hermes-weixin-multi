@@ -1331,7 +1331,7 @@ class WeixinMultiAdapter(BasePlatformAdapter):
         self._token_store = ContextTokenStore(hermes_home)
         self._typing_cache = TypingTicketCache()
         self._dedup = MessageDeduplicator(ttl_seconds=MESSAGE_DEDUP_TTL_SECONDS)
-        self._current_account_id: Optional[str] = None  # Context for download methods
+        # (account_id is passed through method params, no shared instance variable needed)
 
         # Shared settings
         self._send_chunk_delay_seconds = float(
@@ -1673,8 +1673,7 @@ class WeixinMultiAdapter(BasePlatformAdapter):
                 logger.debug("[%s] Content-dedup: skipping duplicate message from %s", self.name, sender_id)
                 return
 
-        # Set context for download methods
-        self._current_account_id = account_id
+        # account_id passed through to download methods (no shared instance variable)
         try:
             chat_type, effective_chat_id = _guess_chat_type(message, account_id)
             if chat_type == "group":
@@ -1688,17 +1687,17 @@ class WeixinMultiAdapter(BasePlatformAdapter):
             context_token = str(message.get("context_token") or "").strip()
             if context_token:
                 self._token_store.set(account_id, sender_id, context_token)
-            asyncio.create_task(self._maybe_fetch_typing_ticket(sender_id, context_token or None))
+            asyncio.create_task(self._maybe_fetch_typing_ticket(sender_id, context_token or None, account_id))
 
             media_paths: List[str] = []
             media_types: List[str] = []
 
             for item in item_list:
-                await self._collect_media(item, media_paths, media_types)
+                await self._collect_media(item, media_paths, media_types, account_id)
                 ref_message = item.get("ref_msg") or {}
                 ref_item = ref_message.get("message_item")
                 if isinstance(ref_item, dict):
-                    await self._collect_media(ref_item, media_paths, media_types)
+                    await self._collect_media(ref_item, media_paths, media_types, account_id)
 
             if not text and not media_paths:
                 return
@@ -1734,7 +1733,7 @@ class WeixinMultiAdapter(BasePlatformAdapter):
             logger.info("[%s] inbound from=%s type=%s media=%d", self.name, _safe_id(sender_id), source.chat_type, len(media_paths))
             await self.handle_message(event)
         finally:
-            self._current_account_id = None
+            pass  # account_id passed through params, no cleanup needed
 
     def _is_dm_allowed(self, sender_id: str) -> bool:
         if self._dm_policy == "disabled":
@@ -1743,38 +1742,36 @@ class WeixinMultiAdapter(BasePlatformAdapter):
             return sender_id in self._allow_from
         return True
 
-    async def _collect_media(self, item: Dict[str, Any], media_paths: List[str], media_types: List[str]) -> None:
+    async def _collect_media(self, item: Dict[str, Any], media_paths: List[str], media_types: List[str], account_id: str) -> None:
         item_type = item.get("type")
         if item_type == ITEM_IMAGE:
-            path = await self._download_image(item)
+            path = await self._download_image(item, account_id)
             if path:
                 media_paths.append(path)
                 media_types.append("image/jpeg")
         elif item_type == ITEM_VIDEO:
-            path = await self._download_video(item)
+            path = await self._download_video(item, account_id)
             if path:
                 media_paths.append(path)
                 media_types.append("video/mp4")
         elif item_type == ITEM_FILE:
-            path, mime = await self._download_file(item)
+            path, mime = await self._download_file(item, account_id)
             if path:
                 media_paths.append(path)
                 media_types.append(mime)
         elif item_type == ITEM_VOICE:
-            voice_path = await self._download_voice(item)
+            voice_path = await self._download_voice(item, account_id)
             if voice_path:
                 media_paths.append(voice_path)
                 media_types.append("audio/silk")
 
-    def _get_current_account(self) -> Tuple[str, Dict[str, Any]]:
-        """Get the account_id and account state for current context."""
-        acc_id = self._current_account_id or self._account_id
-        return acc_id, self._accounts.get(acc_id, {})
+    def _get_account_state(self, account_id: str) -> Tuple[str, Dict[str, Any]]:
+        """Get the account_id and account state for a given account."""
+        return account_id, self._accounts.get(account_id, {})
 
-    def _get_current_session(self) -> Optional["aiohttp.ClientSession"]:
-        """Get the appropriate poll session for current processing context."""
-        acc_id = self._current_account_id or self._account_id
-        return self._poll_sessions.get(acc_id)
+    def _get_account_session(self, account_id: str) -> Optional["aiohttp.ClientSession"]:
+        """Get the appropriate poll session for a given account."""
+        return self._poll_sessions.get(account_id)
 
     def _get_send_session(self, chat_id: str) -> Tuple[Optional["aiohttp.ClientSession"], Dict[str, Any], str]:
         """Get the send session, account, and account_id for a given chat."""
@@ -1958,12 +1955,12 @@ class WeixinMultiAdapter(BasePlatformAdapter):
             logger.error("[%s] QR login error: %s", self.name, exc, exc_info=True)
             await self._send_reply(chat_id, f"❌ 登录出错：{str(exc)[:200]}")
 
-    async def _download_image(self, item: Dict[str, Any]) -> Optional[str]:
+    async def _download_image(self, item: Dict[str, Any], account_id: str) -> Optional[str]:
         media = _media_reference(item, "image_item")
-        session = self._get_current_session()
+        session = self._get_account_session(account_id)
         if not session:
             return None
-        _, account = self._get_current_account()
+        _, account = self._get_account_state(account_id)
         cdn_base_url = account.get("cdn_base_url", WEIXIN_CDN_BASE_URL)
         try:
             data = await _download_and_decrypt_media(
@@ -1981,12 +1978,12 @@ class WeixinMultiAdapter(BasePlatformAdapter):
             logger.warning("[%s] image download failed: %s", self.name, exc)
             return None
 
-    async def _download_video(self, item: Dict[str, Any]) -> Optional[str]:
+    async def _download_video(self, item: Dict[str, Any], account_id: str) -> Optional[str]:
         media = _media_reference(item, "video_item")
-        session = self._get_current_session()
+        session = self._get_account_session(account_id)
         if not session:
             return None
-        _, account = self._get_current_account()
+        _, account = self._get_account_state(account_id)
         cdn_base_url = account.get("cdn_base_url", WEIXIN_CDN_BASE_URL)
         try:
             data = await _download_and_decrypt_media(
@@ -2002,15 +1999,15 @@ class WeixinMultiAdapter(BasePlatformAdapter):
             logger.warning("[%s] video download failed: %s", self.name, exc)
             return None
 
-    async def _download_file(self, item: Dict[str, Any]) -> Tuple[Optional[str], str]:
+    async def _download_file(self, item: Dict[str, Any], account_id: str) -> Tuple[Optional[str], str]:
         file_item = item.get("file_item") or {}
         media = file_item.get("media") or {}
         filename = str(file_item.get("file_name") or "document.bin")
         mime = _mime_from_filename(filename)
-        session = self._get_current_session()
+        session = self._get_account_session(account_id)
         if not session:
             return None, mime
-        _, account = self._get_current_account()
+        _, account = self._get_account_state(account_id)
         cdn_base_url = account.get("cdn_base_url", WEIXIN_CDN_BASE_URL)
         try:
             data = await _download_and_decrypt_media(
@@ -2026,15 +2023,15 @@ class WeixinMultiAdapter(BasePlatformAdapter):
             logger.warning("[%s] file download failed: %s", self.name, exc)
             return None, mime
 
-    async def _download_voice(self, item: Dict[str, Any]) -> Optional[str]:
+    async def _download_voice(self, item: Dict[str, Any], account_id: str) -> Optional[str]:
         voice_item = item.get("voice_item") or {}
         media = voice_item.get("media") or {}
         if voice_item.get("text"):
             return None
-        session = self._get_current_session()
+        session = self._get_account_session(account_id)
         if not session:
             return None
-        _, account = self._get_current_account()
+        _, account = self._get_account_state(account_id)
         cdn_base_url = account.get("cdn_base_url", WEIXIN_CDN_BASE_URL)
         try:
             data = await _download_and_decrypt_media(
@@ -2050,8 +2047,8 @@ class WeixinMultiAdapter(BasePlatformAdapter):
             logger.warning("[%s] voice download failed: %s", self.name, exc)
             return None
 
-    async def _maybe_fetch_typing_ticket(self, user_id: str, context_token: Optional[str]) -> None:
-        acc_id = self._current_account_id or self._account_id
+    async def _maybe_fetch_typing_ticket(self, user_id: str, context_token: Optional[str], account_id: str = "") -> None:
+        acc_id = account_id or self._account_id
         session = self._poll_sessions.get(acc_id)
         account = self._accounts.get(acc_id, {})
         token = account.get("token", "")
