@@ -2492,27 +2492,24 @@ class WeixinMultiAdapter(BasePlatformAdapter):
             "filename": Path(path).name,
             "rawfilemd5": rawfilemd5,
         }
-        if media_type == MEDIA_VOICE and path.endswith(".silk"):
+        if media_type == MEDIA_VOICE and (path.endswith(".silk") or path.endswith(".slk")):
             item_kwargs["encode_type"] = 6
             item_kwargs["sample_rate"] = 24000
             item_kwargs["bits_per_sample"] = 16
         media_item = item_builder(**item_kwargs)
 
-        last_message_id = None
+        # Build item_list: if caption provided, include TEXT item before media
+        # (same message, not separate — matches OpenClaw sendMediaMessage pattern)
+        items = []
         if caption:
-            last_message_id = f"hermes-weixin-{uuid.uuid4().hex}"
-            await _send_message(
-                send_session,
-                base_url=base_url,
-                token=token,
-                to=chat_id,
-                text=self.format_message(caption),
-                context_token=context_token,
-                client_id=last_message_id,
-            )
+            items.append({
+                "type": ITEM_TEXT,
+                "text_item": {"text": self.format_message(caption)},
+            })
+        items.append(media_item)
 
         last_message_id = f"hermes-weixin-{uuid.uuid4().hex}"
-        await _api_post(
+        send_resp = await _api_post(
             send_session,
             base_url=base_url,
             endpoint=EP_SEND_MESSAGE,
@@ -2523,13 +2520,19 @@ class WeixinMultiAdapter(BasePlatformAdapter):
                     "client_id": last_message_id,
                     "message_type": MSG_TYPE_BOT,
                     "message_state": MSG_STATE_FINISH,
-                    "item_list": [media_item],
+                    "item_list": items,
                     **({"context_token": context_token} if context_token else {}),
                 }
             },
             token=token,
             timeout_ms=API_TIMEOUT_MS,
         )
+        # Check API response for errors (HTTP 200 but errcode in body)
+        errcode = send_resp.get("errcode") if isinstance(send_resp, dict) else None
+        if errcode and errcode != 0:
+            errmsg = send_resp.get("errmsg", "")
+            logger.error("[%s] sendmessage API error: errcode=%s errmsg=%s", self.name, errcode, errmsg)
+            raise RuntimeError(f"iLink API error: {errcode} {errmsg}")
         return last_message_id
 
     def _outbound_media_builder(self, path: str, force_file_attachment: bool = False):
@@ -2560,7 +2563,7 @@ class WeixinMultiAdapter(BasePlatformAdapter):
                     "video_md5": kw.get("rawfilemd5", ""),
                 },
             }
-        if path.endswith(".silk") and not force_file_attachment:
+        if (path.endswith(".silk") or path.endswith(".slk")) and not force_file_attachment:
             return MEDIA_VOICE, lambda **kw: {
                 "type": ITEM_VOICE,
                 "voice_item": {
