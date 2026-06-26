@@ -1465,6 +1465,10 @@ class WeixinMultiAdapter(BasePlatformAdapter):
             # dynamically via /wechat-login from any channel.
             logger.info("[%s] No accounts configured yet; waiting for /wechat-login", self.name)
             self._mark_connected()
+            # Start polling pending QR logins
+            self._pending_qr_task = asyncio.create_task(
+                self._poll_pending_qr(), name="weixin-pending-qr"
+            )
             return True
 
         # Initialize sessions for each account and start polling
@@ -1525,6 +1529,119 @@ class WeixinMultiAdapter(BasePlatformAdapter):
                 self._group_policy,
             )
         return True
+
+    async def _poll_pending_qr(self) -> None:
+        """Background task: check for pending QR logins from WebUI and complete them."""
+        import sys as _sys
+        _adapter_dir = os.path.dirname(os.path.abspath(__file__))
+        # Import adapter module functions
+        _plugin_dir = os.path.join(os.path.expanduser("~"), ".hermes", "plugins", "weixin-multi")
+        if _plugin_dir not in _sys.path:
+            _sys.path.insert(0, _plugin_dir)
+        
+        while True:
+            try:
+                # Check for pending QR file
+                hermes_home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+                pending_file = os.path.join(hermes_home, "weixin", "pending_qr.json")
+                if not os.path.exists(pending_file):
+                    await asyncio.sleep(5)
+                    continue
+                
+                with open(pending_file) as f:
+                    pending = json.load(f)
+                
+                qrcode_value = pending.get("qrcode", "")
+                created_at = pending.get("created_at", 0)
+                
+                # Expire after 5 minutes
+                if time.time() - created_at > 300:
+                    os.remove(pending_file)
+                    await asyncio.sleep(5)
+                    continue
+                
+                # Poll QR status
+                status_url = f"{ILINK_BASE_URL}{EP_GET_QR_STATUS}?qrcode={qrcode_value}"
+                timeout = aiohttp.ClientTimeout(total=QR_TIMEOUT_MS / 1000)
+                async with self._poll_sessions.get("_pending", aiohttp.ClientSession(
+                    trust_env=True, connector=_make_ssl_connector()
+                )) as session:
+                    async with session.get(status_url, timeout=timeout) as resp:
+                        status_resp = await resp.json(content_type=None)
+                
+                status = str(status_resp.get("status") or "wait")
+                
+                if status == "confirmed":
+                    token_new = str(status_resp.get("bot_token") or "")
+                    base_url_new = str(status_resp.get("baseurl") or ILINK_BASE_URL)
+                    
+                    if token_new:
+                        # Generate account ID
+                        accounts_dir = os.path.join(hermes_home, "weixin", "accounts")
+                        os.makedirs(accounts_dir, exist_ok=True)
+                        existing = {f.replace(".json", "") for f in os.listdir(accounts_dir) if f.endswith(".json")}
+                        n = 1
+                        while f"wechat-{n}" in existing:
+                            n += 1
+                        acct_id = f"wechat-{n}"
+                        
+                        # Save to disk
+                        account_file = os.path.join(accounts_dir, f"{acct_id}.json")
+                        with open(account_file, "w") as f:
+                            json.dump({
+                                "token": token_new,
+                                "base_url": base_url_new,
+                                "cdn_base_url": WEIXIN_CDN_BASE_URL,
+                                "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            }, f, indent=2)
+                        
+                        # Add to running adapter
+                        self._accounts[acct_id] = {
+                            "token": token_new,
+                            "base_url": base_url_new,
+                            "cdn_base_url": WEIXIN_CDN_BASE_URL,
+                        }
+                        
+                        # Start polling
+                        no_timeout = aiohttp.ClientTimeout(total=None)
+                        poll_session = aiohttp.ClientSession(
+                            trust_env=True, connector=_make_ssl_connector()
+                        )
+                        send_session = aiohttp.ClientSession(
+                            trust_env=True, connector=_make_ssl_connector(),
+                            timeout=no_timeout,
+                        )
+                        self._poll_sessions[acct_id] = poll_session
+                        self._send_sessions[acct_id] = send_session
+                        self._sync_bufs[acct_id] = _load_sync_buf(hermes_home, acct_id)
+                        task = asyncio.create_task(
+                            self._poll_loop(acct_id),
+                            name=f"weixin-poll-{acct_id}",
+                        )
+                        self._poll_tasks[acct_id] = task
+                        _LIVE_ADAPTERS[token_new] = self
+                        accountPolling[acct_id] = {"running": True, "task": task}
+                        
+                        logger.info("✅ 新账号 %s 登录成功（从 WebUI）！", acct_id)
+                    
+                    # Clear pending QR
+                    os.remove(pending_file)
+                
+                elif status in ("wait", "scaned", "scaned_but_redirect"):
+                    await asyncio.sleep(3)
+                
+                elif status == "expired":
+                    os.remove(pending_file)
+                    await asyncio.sleep(5)
+                
+                else:
+                    await asyncio.sleep(3)
+            
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug("Pending QR poll error: %s", e)
+                await asyncio.sleep(5)
 
     async def disconnect(self) -> None:
         # Clean up all poll tasks
