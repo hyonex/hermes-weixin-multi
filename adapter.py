@@ -289,36 +289,14 @@ def register(ctx):
                 # Store pending QR for gateway to poll
                 _save_pending_qr(qrcode_value, qr_link)
 
-                # Generate QR code image as base64 data URL
-                try:
-                    import qrcode as _qrcode
-                    from io import BytesIO
-                    import base64 as _b64
-                    qr_img = _qrcode.make(qr_link)
-                    buf = BytesIO()
-                    qr_img.save(buf, format='PNG')
-                    qr_b64 = _b64.b64encode(buf.getvalue()).decode()
-                    qr_data_url = f"data:image/png;base64,{qr_b64}"
-                    return (
-                        f"📱 请用微信扫描以下二维码登录：\n\n"
-                        f"![QR Code]({qr_data_url})\n\n"
-                        f"⏳ 二维码5分钟内有效，请尽快扫描。\n\n"
-                        f"扫码后手机上点「确认」，Gateway 会自动完成登录。\n"
-                        f"登录成功后直接在微信发消息测试即可。\n"
-                        f"用 /wechat-list 查看账号状态。"
-                    )
-                except Exception as e:
-                    import logging
-                    logging.getLogger("weixin-multi").warning("QR generation failed: %s", e)
-                    # Fallback to text link if QR generation fails
-                    return (
-                        f"📱 请用微信扫描以下链接登录：\n\n"
-                        f"{qr_link}\n\n"
-                        f"⏳ 二维码5分钟内有效，请尽快扫描。\n\n"
-                        f"扫码后手机上点「确认」，Gateway 会自动完成登录。\n"
-                        f"登录成功后直接在微信发消息测试即可。\n"
-                        f"用 /wechat-list 查看账号状态。"
-                    )
+                return (
+                    f"📱 请用微信扫描以下链接登录：\n\n"
+                    f"{qr_link}\n\n"
+                    f"⏳ 二维码5分钟内有效，请尽快扫描。\n\n"
+                    f"扫码后手机上点「确认」，Gateway 会自动完成登录。\n"
+                    f"登录成功后直接在微信发消息测试即可。\n"
+                    f"用 /wechat-list 查看账号状态。"
+                )
         except Exception as e:
             return f"❌ 获取二维码失败: {e}"
 

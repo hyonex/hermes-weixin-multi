@@ -10,7 +10,7 @@ License: MIT (see LICENSE file)
 Modifications:
 - Multi-account support (wechat-1, wechat-2, ...)
 - Auto account ID generation with persistent counter
-- Dynamic account addition via /wechat-login command
+- Dynamic account addition via /wechat-login command (QR code sent as image in chat)
 - Account status query via /wechat-list command
 
 Design notes:
@@ -1929,6 +1929,53 @@ class WeixinMultiAdapter(BasePlatformAdapter):
         lines.append("\n发送 /wechat-login 添加新账号")
         await self._send_reply(chat_id, "\n".join(lines))
 
+    async def _send_qr_image(self, chat_id: str, qrcode_url: str, qrcode_value: str) -> bool:
+        """Download QR image from URL or generate from token, send to chat.
+        Returns True if sent successfully, False otherwise.
+        """
+        # Try remote URL first
+        if qrcode_url and qrcode_url.startswith(("http://", "https://")):
+            try:
+                result = await self.send_image(
+                    chat_id=chat_id,
+                    image_url=qrcode_url,
+                    caption="📱 请用微信扫描二维码登录",
+                )
+                if result.success:
+                    return True
+            except Exception as exc:
+                logger.warning("[%s] Failed to send remote QR image: %s", self.name, exc)
+
+        # Generate local QR code as fallback
+        try:
+            import qrcode as _qrcode
+            import io as _io
+
+            qr = _qrcode.QRCode(version=1, box_size=10, border=2)
+            qr.add_data(qrcode_url if qrcode_url else qrcode_value)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="black", back_color="white")
+
+            buf = _io.BytesIO()
+            img.save(buf, format="PNG")
+            buf.seek(0)
+
+            tmp_path = os.path.join(tempfile.gettempdir(), f"wechat_qr_{uuid.uuid4().hex[:8]}.png")
+            with open(tmp_path, "wb") as f:
+                f.write(buf.read())
+
+            result = await self.send_image_file(
+                chat_id=chat_id,
+                image_path=tmp_path,
+                caption="📱 请用微信扫描二维码登录",
+            )
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            return result.success
+        except Exception as exc:
+            logger.error("[%s] Failed to generate local QR: %s", self.name, exc)
+            return False
+
     async def _cmd_wechat_login(self, chat_id: str, account_id: str, context_token: Optional[str]) -> None:
         """Handle /wechat-login: start QR login flow and add new account."""
         await self._send_reply(chat_id, "📱 正在获取二维码，请稍候...")
@@ -1952,10 +1999,15 @@ class WeixinMultiAdapter(BasePlatformAdapter):
                     await self._send_reply(chat_id, "❌ 获取二维码失败：服务端无响应")
                     return
 
-                qr_link = qrcode_url if qrcode_url else qrcode_value
-                await self._send_reply(chat_id, f"📱 请用微信扫描以下链接登录：\n\n{qr_link}\n\n⏳ 二维码5分钟内有效，请尽快扫描。")
+                # Step 2: Send QR code image to chat
+                sent = await self._send_qr_image(chat_id, qrcode_url, qrcode_value)
+                if not sent:
+                    qr_link = qrcode_url if qrcode_url else qrcode_value
+                    await self._send_reply(chat_id, f"📱 请用微信扫描以下链接登录：\n\n{qr_link}\n\n⏳ 二维码5分钟内有效，请尽快扫描。")
+                else:
+                    await self._send_reply(chat_id, "⏳ 二维码5分钟内有效，请尽快扫码后点击确认。")
 
-                # Step 2: Poll for QR scan status
+                # Step 3: Poll for QR scan status
                 deadline = time.monotonic() + 300  # 5 min timeout
                 current_base_url = ILINK_BASE_URL
                 refresh_count = 0
@@ -2006,7 +2058,8 @@ class WeixinMultiAdapter(BasePlatformAdapter):
                         qrcode_value = str(qr_resp.get("qrcode") or "")
                         qrcode_url = str(qr_resp.get("qrcode_img_content") or "")
                         qr_link = qrcode_url if qrcode_url else qrcode_value
-                        if qr_link:
+                        sent = await self._send_qr_image(chat_id, qr_link, qrcode_value)
+                        if not sent:
                             await self._send_reply(chat_id, f"📱 新二维码：\n\n{qr_link}")
                         sent_scan_notice = False
                     elif status == "confirmed":
