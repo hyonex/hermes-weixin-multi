@@ -1947,6 +1947,10 @@ class WeixinMultiAdapter(BasePlatformAdapter):
                 logger.warning("[%s] Failed to send remote QR image: %s", self.name, exc)
 
         # Generate local QR code as fallback
+        return await self._send_qr_image_local(chat_id, qrcode_url, qrcode_value)
+
+    async def _send_qr_image_local(self, chat_id: str, qrcode_url: str, qrcode_value: str) -> bool:
+        """Generate local QR code image and send to chat. Always uses local generation."""
         try:
             import qrcode as _qrcode
             import io as _io
@@ -1963,12 +1967,16 @@ class WeixinMultiAdapter(BasePlatformAdapter):
             tmp_path = os.path.join(tempfile.gettempdir(), f"wechat_qr_{uuid.uuid4().hex[:8]}.png")
             with open(tmp_path, "wb") as f:
                 f.write(buf.read())
+            file_size = os.path.getsize(tmp_path)
+            print(f"[WEIXIN-MULTI] QR file created: {tmp_path} size={file_size}", flush=True)
 
             result = await self.send_image_file(
                 chat_id=chat_id,
                 image_path=tmp_path,
-                caption="📱 请用微信扫描二维码登录",
+                caption=None,  # No caption - pure image message
             )
+            file_exists_after = os.path.exists(tmp_path)
+            print(f"[WEIXIN-MULTI] send_image_file result: success={result.success} error={result.error} msg_id={result.message_id} file_after={file_exists_after}", flush=True)
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
             return result.success
@@ -1999,13 +2007,30 @@ class WeixinMultiAdapter(BasePlatformAdapter):
                     await self._send_reply(chat_id, "❌ 获取二维码失败：服务端无响应")
                     return
 
-                # Step 2: Send QR code image to chat
-                sent = await self._send_qr_image(chat_id, qrcode_url, qrcode_value)
-                if not sent:
-                    qr_link = qrcode_url if qrcode_url else qrcode_value
-                    await self._send_reply(chat_id, f"📱 请用微信扫描以下链接登录：\n\n{qr_link}\n\n⏳ 二维码5分钟内有效，请尽快扫描。")
-                else:
-                    await self._send_reply(chat_id, "⏳ 二维码5分钟内有效，请尽快扫码后点击确认。")
+                qr_link = qrcode_url if qrcode_url else qrcode_value
+                # Send text link
+                await self._send_reply(chat_id, f"📱 请用微信扫描以下二维码登录：\n\n{qr_link}\n\n⏳ 二维码5分钟内有效，请尽快扫描。\n扫码后手机上点「确认」，Gateway 会自动完成登录。")
+                # Send QR image (fixed filename per session, overwrite each time, never delete)
+                try:
+                    import qrcode as _qrcode
+                    import io as _io
+                    qr = _qrcode.QRCode(version=1, box_size=10, border=2)
+                    qr.add_data(qrcode_url if qrcode_url else qrcode_value)
+                    qr.make(fit=True)
+                    img = qr.make_image(fill_color="black", back_color="white")
+                    buf = _io.BytesIO()
+                    img.save(buf, format="PNG")
+                    buf.seek(0)
+                    # 固定文件名：基于 chat_id，每次覆盖
+                    safe_id = chat_id.replace("@", "_").replace(":", "_").replace("/", "_")
+                    tmp_path = os.path.join(tempfile.gettempdir(), f"hmes_wxqr_{safe_id}.png")
+                    with open(tmp_path, "wb") as f:
+                        f.write(buf.read())
+                    print(f"[WEIXIN-MULTI] QR file: {tmp_path} size={os.path.getsize(tmp_path)}", flush=True)
+                    result = await self.send_image_file(chat_id=chat_id, image_path=tmp_path, caption=None)
+                    print(f"[WEIXIN-MULTI] send_image_file: success={result.success} error={result.error}", flush=True)
+                except Exception as e:
+                    print(f"[WEIXIN-MULTI] QR image error: {e}", flush=True)
 
                 # Step 3: Poll for QR scan status
                 deadline = time.monotonic() + 300  # 5 min timeout
@@ -2058,9 +2083,26 @@ class WeixinMultiAdapter(BasePlatformAdapter):
                         qrcode_value = str(qr_resp.get("qrcode") or "")
                         qrcode_url = str(qr_resp.get("qrcode_img_content") or "")
                         qr_link = qrcode_url if qrcode_url else qrcode_value
-                        sent = await self._send_qr_image(chat_id, qr_link, qrcode_value)
-                        if not sent:
-                            await self._send_reply(chat_id, f"📱 新二维码：\n\n{qr_link}")
+                        await self._send_reply(chat_id, f"📱 新二维码：\n\n{qr_link}")
+                        # Send new QR image (overwrite same file)
+                        try:
+                            import qrcode as _qrcode
+                            import io as _io
+                            qr = _qrcode.QRCode(version=1, box_size=10, border=2)
+                            qr.add_data(qrcode_url if qrcode_url else qrcode_value)
+                            qr.make(fit=True)
+                            img = qr.make_image(fill_color="black", back_color="white")
+                            buf = _io.BytesIO()
+                            img.save(buf, format="PNG")
+                            buf.seek(0)
+                            safe_id = chat_id.replace("@", "_").replace(":", "_").replace("/", "_")
+                            tmp_path = os.path.join(tempfile.gettempdir(), f"hmes_wxqr_{safe_id}.png")
+                            with open(tmp_path, "wb") as f:
+                                f.write(buf.read())
+                            result = await self.send_image_file(chat_id=chat_id, image_path=tmp_path, caption=None)
+                            print(f"[WEIXIN-MULTI] refresh QR image: success={result.success}", flush=True)
+                        except Exception as e:
+                            print(f"[WEIXIN-MULTI] refresh QR image error: {e}", flush=True)
                         sent_scan_notice = False
                     elif status == "confirmed":
                         acc_id_new = str(status_resp.get("ilink_bot_id") or "")
