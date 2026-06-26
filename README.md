@@ -14,10 +14,9 @@
 
 ### 作者信息
 
-- **作者**：hyonex
-- **微信**：o9cq808_6Hut1AHLIGydSqHspxwY
-- **QQ**：1112224589
-- **邮箱**：hyonex@proton.me
+- **Author**: hyonex
+- **微信**: hyonex1
+- **QQ**: 464793609
 
 ### 许可证
 
