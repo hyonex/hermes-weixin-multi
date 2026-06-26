@@ -143,7 +143,8 @@ def _list_accounts() -> list:
     accounts = []
     if os.path.isdir(accounts_dir):
         for f in sorted(os.listdir(accounts_dir)):
-            if f.endswith(".json"):
+            # Only match actual account files: wechat-N.json
+            if f.endswith(".json") and f.startswith("wechat-") and not "." in f[:-5]:
                 account_id = f.replace(".json", "")
                 path = os.path.join(accounts_dir, f)
                 try:
