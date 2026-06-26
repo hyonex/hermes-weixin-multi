@@ -158,6 +158,47 @@ def _list_accounts() -> list:
                     accounts.append({"id": account_id, "token": "???", "base_url": ""})
     return accounts
 
+# ── Pending QR management ──
+# When /wechat-login is called from WebUI, the QR data is saved to disk.
+# The gateway process polls this file and completes the login when confirmed.
+
+def _pending_qr_file() -> str:
+    hermes_home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+    return os.path.join(hermes_home, "weixin", "pending_qr.json")
+
+def _save_pending_qr(qrcode_value: str, qr_link: str) -> None:
+    """Save pending QR for gateway to poll."""
+    pending_file = _pending_qr_file()
+    os.makedirs(os.path.dirname(pending_file), exist_ok=True)
+    with open(pending_file, "w") as f:
+        json.dump({
+            "qrcode": qrcode_value,
+            "link": qr_link,
+            "created_at": time.time(),
+        }, f)
+
+def _load_pending_qr() -> Optional[dict]:
+    """Load pending QR data. Returns None if none or expired."""
+    pending_file = _pending_qr_file()
+    if not os.path.exists(pending_file):
+        return None
+    try:
+        with open(pending_file) as f:
+            data = json.load(f)
+        # Expire after 5 minutes
+        if time.time() - data.get("created_at", 0) > 300:
+            os.remove(pending_file)
+            return None
+        return data
+    except Exception:
+        return None
+
+def _clear_pending_qr() -> None:
+    """Remove pending QR file after successful login."""
+    pending_file = _pending_qr_file()
+    if os.path.exists(pending_file):
+        os.remove(pending_file)
+
 
 def register(ctx):
     """
@@ -244,69 +285,17 @@ def register(ctx):
 
                 qr_link = qrcode_url or qrcode_value
 
-                # Step 2: Poll QR status (synchronous — wait for scan)
-                import asyncio as _aio
-                deadline = time.time() + 300  # 5 min
-                refresh_count = 0
-                account_saved = False
+                # Store pending QR for gateway to poll
+                _save_pending_qr(qrcode_value, qr_link)
 
-                while time.time() < deadline:
-                    try:
-                        status_url = f"{ILINK_BASE_URL}{EP_GET_QR_STATUS}?qrcode={qrcode_value}"
-                        timeout2 = aio.ClientTimeout(total=QR_TIMEOUT_MS / 1000)
-                        async with session.get(status_url, timeout=timeout2) as resp2:
-                            status_resp = await resp2.json(content_type=None)
-                    except Exception:
-                        await _aio.sleep(2)
-                        continue
-
-                    status = str(status_resp.get("status") or "wait")
-
-                    if status == "confirmed":
-                        token_new = str(status_resp.get("bot_token") or "")
-                        base_url_new = str(status_resp.get("baseurl") or ILINK_BASE_URL)
-                        if token_new:
-                            acct_id = _generate_account_id()
-                            _save_account(acct_id, token_new, base_url_new)
-                            account_saved = True
-                            return (
-                                f"✅ 微信登录成功！\n\n"
-                                f"账号: {acct_id}\n"
-                                f"Token 已保存。\n\n"
-                                f"请运行 `hermes gateway restart` 使新账号开始轮询。"
-                            )
-                        return "❌ 登录确认但未收到 token"
-                    elif status == "scaned":
-                        # Wait for user to confirm
-                        await _aio.sleep(2)
-                    elif status == "scaned_but_redirect":
-                        redirect_host = str(status_resp.get("redirect_host") or "")
-                        if redirect_host:
-                            return (
-                                f"🔄 已扫码，需要重定向到 {redirect_host}。\n"
-                                f"请在新设备上继续操作。"
-                            )
-                        await _aio.sleep(2)
-                    elif status == "expired":
-                        refresh_count += 1
-                        if refresh_count > 3:
-                            return "❌ 二维码已过期，请重新运行 /wechat-login"
-                        # Re-fetch QR
-                        try:
-                            async with session.get(url, timeout=timeout) as resp3:
-                                qr_resp2 = await resp3.json(content_type=None)
-                                new_qr = str(qr_resp2.get("qrcode") or "")
-                                new_url = str(qr_resp2.get("qrcode_img_content") or "")
-                                if new_qr:
-                                    qrcode_value = new_qr
-                                    qr_link = new_url or new_qr
-                        except Exception:
-                            pass
-                        return f"❌ 二维码已过期，请重新运行 /wechat-login"
-                    else:
-                        await _aio.sleep(2)
-
-                return "❌ 登录超时（5分钟），请重新运行 /wechat-login"
+                return (
+                    f"📱 请用微信扫描以下链接登录：\n\n"
+                    f"{qr_link}\n\n"
+                    f"⏳ 二维码5分钟内有效，请尽快扫描。\n\n"
+                    f"扫码后手机上点「确认」，Gateway 会自动完成登录。\n"
+                    f"登录成功后直接在微信发消息测试即可。\n"
+                    f"用 /wechat-list 查看账号状态。"
+                )
         except Exception as e:
             return f"❌ 获取二维码失败: {e}"
 
