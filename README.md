@@ -2,6 +2,32 @@
 
 基于 iLink Bot API 的微信多账号接入插件，用于 Hermes Agent。
 
+## 版权声明
+
+本项目基于 [Hermes Agent](https://github.com/nousresearch/hermes-agent) 的 `weixin.py` 平台适配器修改而来。
+原项目采用 MIT License，版权所有 © 2025 Nous Research。
+
+**本项目（Weixin-Multi Adapter）版权：**
+- 允许自由引用、修改、非商业使用
+- **禁止商用**
+- 修改后的代码需注明来源
+
+### 作者信息
+
+- **作者**：hyonex
+- **微信**：o9cq808_6Hut1AHLIGydSqHspxwY
+- **QQ**：1112224589
+- **邮箱**：hyonex@proton.me
+
+### 许可证
+
+```
+MIT License - 原版 Hermes Agent (Nous Research)
+本修改版保留原版 MIT License，附加以下条款：
+- 仅限非商业使用
+- 引用或再分发需注明来源
+```
+
 ## 与原版插件的区别
 
 | 功能 | 原版 `weixin` | 本插件 `weixin_multi` |
