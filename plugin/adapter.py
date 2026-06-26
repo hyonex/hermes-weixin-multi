@@ -24,6 +24,8 @@ import importlib.util
 import json
 import os
 import sys
+import uuid
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -90,6 +92,73 @@ def _env_enablement() -> Optional[dict]:
     return extra
 
 
+# ── Standalone command helpers (work from any process) ──
+# These don't need the adapter instance — they use iLink API directly
+# and read/write account files on disk.
+
+ILINK_BASE_URL = "https://ilinkai.weixin.qq.com"
+CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
+EP_GET_BOT_QR = "/ilink/bot/get_qrcode"
+EP_GET_QR_STATUS = "/ilink/bot/get_qrcode_status"
+QR_TIMEOUT_MS = 5000
+
+def _accounts_dir() -> str:
+    hermes_home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+    return os.path.join(hermes_home, "weixin", "accounts")
+
+def _generate_account_id() -> str:
+    """Generate next available wechat-N account ID."""
+    accounts_dir = _accounts_dir()
+    existing = set()
+    if os.path.isdir(accounts_dir):
+        for f in os.listdir(accounts_dir):
+            if f.endswith(".json"):
+                existing.add(f.replace(".json", ""))
+    
+    n = 1
+    while f"wechat-{n}" in existing:
+        n += 1
+    return f"wechat-{n}"
+
+def _save_account(account_id: str, token: str, base_url: str = "") -> str:
+    """Save account to disk. Returns file path."""
+    accounts_dir = _accounts_dir()
+    os.makedirs(accounts_dir, exist_ok=True)
+    
+    account_data = {
+        "token": token,
+        "base_url": base_url or ILINK_BASE_URL,
+        "cdn_base_url": CDN_BASE_URL,
+        "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    
+    path = os.path.join(accounts_dir, f"{account_id}.json")
+    with open(path, "w") as f:
+        json.dump(account_data, f, indent=2)
+    return path
+
+def _list_accounts() -> list:
+    """List all accounts from disk."""
+    accounts_dir = _accounts_dir()
+    accounts = []
+    if os.path.isdir(accounts_dir):
+        for f in sorted(os.listdir(accounts_dir)):
+            if f.endswith(".json"):
+                account_id = f.replace(".json", "")
+                path = os.path.join(accounts_dir, f)
+                try:
+                    with open(path) as fh:
+                        data = json.load(fh)
+                    accounts.append({
+                        "id": account_id,
+                        "token": data.get("token", ""),
+                        "base_url": data.get("base_url", ""),
+                    })
+                except Exception:
+                    accounts.append({"id": account_id, "token": "???", "base_url": ""})
+    return accounts
+
+
 def register(ctx):
     """
     Plugin entry point — called by Hermes plugin system.
@@ -139,173 +208,117 @@ def register(ctx):
     )
 
     # ── Register global slash commands ──
-    # These work from ANY channel (WebUI, Telegram, etc.), not just WeChat.
-    # This solves the bootstrap problem: first account can be added from WebUI.
-
-    # Store adapter reference for command handlers
-    _adapter_ref = {"instance": None}
-
-    _orig_factory = ctx.register_platform
-
-    def _capture_factory(cfg):
-        adapter = WeixinMultiAdapter(cfg)
-        _adapter_ref["instance"] = adapter
-        return adapter
-
-    # Re-register with capture wrapper
-    ctx.register_platform(
-        name="weixin_multi",
-        label="Weixin Multi",
-        adapter_factory=_capture_factory,
-        check_fn=check_requirements,
-        validate_config=validate_config,
-        required_env=[],
-        install_hint="pip install aiohttp cryptography",
-        env_enablement_fn=_env_enablement,
-    )
+    # These work from ANY channel (WebUI, Telegram, etc.) and from ANY
+    # process (gateway or WebUI) — they use iLink API directly and
+    # read/write account files on disk, no adapter instance needed.
 
     async def _handle_wechat_login_cmd(raw_args: str) -> str:
         """Global /wechat-login: generate QR and wait for scan.
-
-        Works from ANY channel (WebUI, Telegram, etc.).
-        If no accounts exist yet, this is the bootstrap path.
+        
+        Runs in whatever process calls it (gateway or WebUI).
+        Saves token to ~/.hermes/weixin/accounts/<id>.json on success.
         """
-        adapter = _adapter_ref["instance"]
-        if not adapter:
-            return "❌ Weixin Multi 适配器未运行。请先在 config.yaml 中启用 weixin_multi 平台。"
+        try:
+            import aiohttp as aio
+        except ImportError:
+            return "❌ aiohttp 未安装。请运行: pip install aiohttp"
 
         try:
-            # Get QR code directly
-            session = mod.aiohttp.ClientSession(
-                trust_env=True,
-                connector=mod._make_ssl_connector(),
-            )
-            try:
-                qr_resp = await mod._api_get(
-                    session,
-                    base_url=mod.ILINK_BASE_URL,
-                    endpoint=f"{mod.EP_GET_BOT_QR}?bot_type=3",
-                    timeout_ms=mod.QR_TIMEOUT_MS,
-                )
+            ssl_ctx = aio.TCPConnector(ssl=False, limit=10)
+        except Exception:
+            ssl_ctx = None
+
+        try:
+            async with aio.ClientSession(trust_env=True, connector=ssl_ctx) as session:
+                # Step 1: Get QR code
+                url = f"{ILINK_BASE_URL}{EP_GET_BOT_QR}?bot_type=3"
+                timeout = aio.ClientTimeout(total=QR_TIMEOUT_MS / 1000)
+                async with session.get(url, timeout=timeout) as resp:
+                    qr_resp = await resp.json(content_type=None)
+
                 qrcode_value = str(qr_resp.get("qrcode") or "")
                 qrcode_url = str(qr_resp.get("qrcode_img_content") or "")
+
                 if not qrcode_value:
                     return "❌ 获取二维码失败：服务端无响应"
 
                 qr_link = qrcode_url or qrcode_value
 
-                # Start background polling task for QR status
-                import asyncio
-
-                async def _poll_qr_status():
-                    """Background task: poll QR scan status, add account on confirm."""
-                    deadline = asyncio.get_event_loop().time() + 300
-                    current_base_url = mod.ILINK_BASE_URL
+                # Step 2: Poll QR status in background
+                async def _poll():
+                    deadline = time.time() + 300  # 5 min
                     refresh_count = 0
-
-                    while asyncio.get_event_loop().time() < deadline:
+                    while time.time() < deadline:
                         try:
-                            status_resp = await mod._api_get(
-                                session,
-                                base_url=current_base_url,
-                                endpoint=f"{mod.EP_GET_QR_STATUS}?qrcode={qrcode_value}",
-                                timeout_ms=mod.QR_TIMEOUT_MS,
-                            )
+                            status_url = f"{ILINK_BASE_URL}{EP_GET_QR_STATUS}?qrcode={qrcode_value}"
+                            timeout2 = aio.ClientTimeout(total=QR_TIMEOUT_MS / 1000)
+                            async with session.get(status_url, timeout=timeout2) as resp2:
+                                status_resp = await resp2.json(content_type=None)
                         except Exception:
-                            await asyncio.sleep(2)
+                            await __import__("asyncio").sleep(2)
                             continue
 
                         status = str(status_resp.get("status") or "wait")
+
                         if status == "confirmed":
                             token_new = str(status_resp.get("bot_token") or "")
-                            base_url_new = str(status_resp.get("baseurl") or mod.ILINK_BASE_URL)
+                            base_url_new = str(status_resp.get("baseurl") or ILINK_BASE_URL)
                             if token_new:
-                                generated_id = mod.generateAccountId()
-                                mod.saveAccountToConfig(
-                                    str(mod.get_hermes_home()),
-                                    generated_id,
-                                    {
-                                        "token": token_new,
-                                        "base_url": base_url_new,
-                                        "cdn_base_url": mod.WEIXIN_CDN_BASE_URL,
-                                    },
+                                acct_id = _generate_account_id()
+                                _save_account(acct_id, token_new, base_url_new)
+                                import logging
+                                logging.getLogger("weixin-multi").info(
+                                    "✅ 新账号 %s 登录成功！token 已保存。", acct_id
                                 )
-                                # Add to running adapter
-                                adapter._accounts[generated_id] = {
-                                    "token": token_new,
-                                    "base_url": base_url_new,
-                                    "cdn_base_url": mod.WEIXIN_CDN_BASE_URL,
-                                }
-                                # Start polling
-                                no_timeout = mod.aiohttp.ClientTimeout(total=None)
-                                poll_session = mod.aiohttp.ClientSession(
-                                    trust_env=True, connector=mod._make_ssl_connector()
-                                )
-                                send_session = mod.aiohttp.ClientSession(
-                                    trust_env=True, connector=mod._make_ssl_connector(),
-                                    timeout=no_timeout,
-                                )
-                                adapter._poll_sessions[generated_id] = poll_session
-                                adapter._send_sessions[generated_id] = send_session
-                                adapter._sync_bufs[generated_id] = mod._load_sync_buf(
-                                    str(mod.get_hermes_home()), generated_id
-                                )
-                                task = asyncio.create_task(
-                                    adapter._poll_loop(generated_id),
-                                    name=f"weixin-poll-{generated_id}",
-                                )
-                                adapter._poll_tasks[generated_id] = task
-                                mod._LIVE_ADAPTERS[token_new] = adapter
-                                mod.accountPolling[generated_id] = {"running": True, "task": task}
-                                logger.info("✅ 新账号 %s 登录成功！", generated_id)
                             break
-                        elif status == "scaned":
-                            await asyncio.sleep(2)
+                        elif status == "scaned_but_redirect":
+                            redirect_host = str(status_resp.get("redirect_host") or "")
+                            if redirect_host:
+                                nonlocal ILINK_BASE_URL
+                            await __import__("asyncio").sleep(2)
                         elif status == "expired":
                             refresh_count += 1
                             if refresh_count > 3:
                                 break
-                            qr_resp2 = await mod._api_get(
-                                session,
-                                base_url=mod.ILINK_BASE_URL,
-                                endpoint=f"{mod.EP_GET_BOT_QR}?bot_type=3",
-                                timeout_ms=mod.QR_TIMEOUT_MS,
-                            )
-                            # Can't easily update user — just break
-                            break
+                            # Re-fetch QR
+                            try:
+                                async with session.get(url, timeout=timeout) as resp3:
+                                    qr_resp2 = await resp3.json(content_type=None)
+                                    qrcode_value_new = str(qr_resp2.get("qrcode") or "")
+                                    if qrcode_value_new:
+                                        break  # Can't update user — just stop
+                            except Exception:
+                                pass
+                            await __import__("asyncio").sleep(2)
                         else:
-                            await asyncio.sleep(2)
+                            await __import__("asyncio").sleep(2)
 
-                    await session.close()
-
-                asyncio.create_task(_poll_qr_status())
+                __import__("asyncio").create_task(_poll())
 
                 return (
                     f"📱 请用微信扫描以下链接登录：\n\n"
                     f"{qr_link}\n\n"
                     f"⏳ 二维码5分钟内有效，请尽快扫描。\n"
-                    f"扫描确认后会自动添加为新账号。"
+                    f"扫描确认后会自动添加为新账号。\n"
+                    f"添加后请运行 `hermes gateway restart` 使新账号生效。"
                 )
-            except Exception as e:
-                await session.close()
-                return f"❌ 获取二维码失败: {e}"
         except Exception as e:
-            return f"❌ 登录出错: {e}"
+            return f"❌ 获取二维码失败: {e}"
 
     def _handle_wechat_list_cmd(raw_args: str) -> str:
-        """Global /wechat-list: show all accounts and status."""
-        adapter = _adapter_ref["instance"]
-        if not adapter:
-            return "❌ Weixin Multi 适配器未运行。"
+        """Global /wechat-list: show all accounts and status.
+        
+        Works from any process — reads account files from disk.
+        """
+        accounts = _list_accounts()
+        if not accounts:
+            return "📱 暂无微信账号。发送 /wechat-login 添加第一个账号。"
 
         lines = ["📱 Weixin Multi 账号列表：\n"]
-        for acc_id, acc_state in adapter._accounts.items():
-            token = acc_state.get("token", "")
-            status = "✅" if token else "❌"
-            task = adapter._poll_tasks.get(acc_id)
-            running = task and not task.done()
-            lines.append(f"  {status} {acc_id} — {'🟢 轮询中' if running else '🔴 未运行'}")
-        lines.append(f"\n共 {len(adapter._accounts)} 个账号")
+        for acc in accounts:
+            has_token = "✅" if acc.get("token") and acc["token"] != "???" else "❌"
+            lines.append(f"  {has_token} {acc['id']} — token={'已配置' if has_token == '✅' else '未配置'}")
+        lines.append(f"\n共 {len(accounts)} 个账号")
         lines.append("发送 /wechat-login 添加新账号")
         return "\n".join(lines)
 
