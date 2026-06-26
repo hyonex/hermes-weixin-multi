@@ -244,62 +244,69 @@ def register(ctx):
 
                 qr_link = qrcode_url or qrcode_value
 
-                # Step 2: Poll QR status in background
-                async def _poll():
-                    deadline = time.time() + 300  # 5 min
-                    refresh_count = 0
-                    while time.time() < deadline:
+                # Step 2: Poll QR status (synchronous — wait for scan)
+                import asyncio as _aio
+                deadline = time.time() + 300  # 5 min
+                refresh_count = 0
+                account_saved = False
+
+                while time.time() < deadline:
+                    try:
+                        status_url = f"{ILINK_BASE_URL}{EP_GET_QR_STATUS}?qrcode={qrcode_value}"
+                        timeout2 = aio.ClientTimeout(total=QR_TIMEOUT_MS / 1000)
+                        async with session.get(status_url, timeout=timeout2) as resp2:
+                            status_resp = await resp2.json(content_type=None)
+                    except Exception:
+                        await _aio.sleep(2)
+                        continue
+
+                    status = str(status_resp.get("status") or "wait")
+
+                    if status == "confirmed":
+                        token_new = str(status_resp.get("bot_token") or "")
+                        base_url_new = str(status_resp.get("baseurl") or ILINK_BASE_URL)
+                        if token_new:
+                            acct_id = _generate_account_id()
+                            _save_account(acct_id, token_new, base_url_new)
+                            account_saved = True
+                            return (
+                                f"✅ 微信登录成功！\n\n"
+                                f"账号: {acct_id}\n"
+                                f"Token 已保存。\n\n"
+                                f"请运行 `hermes gateway restart` 使新账号开始轮询。"
+                            )
+                        return "❌ 登录确认但未收到 token"
+                    elif status == "scaned":
+                        # Wait for user to confirm
+                        await _aio.sleep(2)
+                    elif status == "scaned_but_redirect":
+                        redirect_host = str(status_resp.get("redirect_host") or "")
+                        if redirect_host:
+                            return (
+                                f"🔄 已扫码，需要重定向到 {redirect_host}。\n"
+                                f"请在新设备上继续操作。"
+                            )
+                        await _aio.sleep(2)
+                    elif status == "expired":
+                        refresh_count += 1
+                        if refresh_count > 3:
+                            return "❌ 二维码已过期，请重新运行 /wechat-login"
+                        # Re-fetch QR
                         try:
-                            status_url = f"{ILINK_BASE_URL}{EP_GET_QR_STATUS}?qrcode={qrcode_value}"
-                            timeout2 = aio.ClientTimeout(total=QR_TIMEOUT_MS / 1000)
-                            async with session.get(status_url, timeout=timeout2) as resp2:
-                                status_resp = await resp2.json(content_type=None)
+                            async with session.get(url, timeout=timeout) as resp3:
+                                qr_resp2 = await resp3.json(content_type=None)
+                                new_qr = str(qr_resp2.get("qrcode") or "")
+                                new_url = str(qr_resp2.get("qrcode_img_content") or "")
+                                if new_qr:
+                                    qrcode_value = new_qr
+                                    qr_link = new_url or new_qr
                         except Exception:
-                            await __import__("asyncio").sleep(2)
-                            continue
+                            pass
+                        return f"❌ 二维码已过期，请重新运行 /wechat-login"
+                    else:
+                        await _aio.sleep(2)
 
-                        status = str(status_resp.get("status") or "wait")
-
-                        if status == "confirmed":
-                            token_new = str(status_resp.get("bot_token") or "")
-                            base_url_new = str(status_resp.get("baseurl") or ILINK_BASE_URL)
-                            if token_new:
-                                acct_id = _generate_account_id()
-                                _save_account(acct_id, token_new, base_url_new)
-                                import logging
-                                logging.getLogger("weixin-multi").info(
-                                    "✅ 新账号 %s 登录成功！token 已保存。", acct_id
-                                )
-                            break
-                        elif status == "scaned_but_redirect":
-                            # Redirect handled transparently by iLink
-                            await __import__("asyncio").sleep(2)
-                        elif status == "expired":
-                            refresh_count += 1
-                            if refresh_count > 3:
-                                break
-                            # Re-fetch QR
-                            try:
-                                async with session.get(url, timeout=timeout) as resp3:
-                                    qr_resp2 = await resp3.json(content_type=None)
-                                    qrcode_value_new = str(qr_resp2.get("qrcode") or "")
-                                    if qrcode_value_new:
-                                        break  # Can't update user — just stop
-                            except Exception:
-                                pass
-                            await __import__("asyncio").sleep(2)
-                        else:
-                            await __import__("asyncio").sleep(2)
-
-                __import__("asyncio").create_task(_poll())
-
-                return (
-                    f"📱 请用微信扫描以下链接登录：\n\n"
-                    f"{qr_link}\n\n"
-                    f"⏳ 二维码5分钟内有效，请尽快扫描。\n"
-                    f"扫描确认后会自动添加为新账号。\n"
-                    f"添加后请运行 `hermes gateway restart` 使新账号生效。"
-                )
+                return "❌ 登录超时（5分钟），请重新运行 /wechat-login"
         except Exception as e:
             return f"❌ 获取二维码失败: {e}"
 
