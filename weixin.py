@@ -1471,6 +1471,11 @@ class WeixinMultiAdapter(BasePlatformAdapter):
             )
             return True
 
+        # Start polling pending QR logins (even with existing accounts)
+        self._pending_qr_task = asyncio.create_task(
+            self._poll_pending_qr(), name="weixin-pending-qr"
+        )
+
         # Initialize sessions for each account and start polling
         _no_aiohttp_timeout = aiohttp.ClientTimeout(total=None, connect=None, sock_connect=None, sock_read=None)
         ssl_connector = _make_ssl_connector()
