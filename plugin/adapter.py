@@ -98,7 +98,7 @@ def _env_enablement() -> Optional[dict]:
 
 ILINK_BASE_URL = "https://ilinkai.weixin.qq.com"
 CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
-EP_GET_BOT_QR = "/ilink/bot/get_qrcode"
+EP_GET_BOT_QR = "/ilink/bot/get_bot_qrcode"
 EP_GET_QR_STATUS = "/ilink/bot/get_qrcode_status"
 QR_TIMEOUT_MS = 5000
 
@@ -272,9 +272,7 @@ def register(ctx):
                                 )
                             break
                         elif status == "scaned_but_redirect":
-                            redirect_host = str(status_resp.get("redirect_host") or "")
-                            if redirect_host:
-                                nonlocal ILINK_BASE_URL
+                            # Redirect handled transparently by iLink
                             await __import__("asyncio").sleep(2)
                         elif status == "expired":
                             refresh_count += 1
