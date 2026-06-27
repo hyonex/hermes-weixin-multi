@@ -202,10 +202,10 @@ hermes gateway restart
 
 ## 📄 许可证 / License
 
-本项目基于 [Hermes Agent](https://github.com/nousresearch/hermes-agent) 的 weixin.py 修改而来。
-*This project is a fork of the `weixin.py` platform adapter from [Hermes Agent](https://github.com/nousresearch/hermes-agent).*
+本项目基于 [Hermes Agent](https://github.com/nousresearch/hermes-agent)（https://github.com/nousresearch/hermes-agent）的 weixin.py 修改而来。
+*This project is a fork of the `weixin.py` platform adapter from [Hermes Agent](https://github.com/nousresearch/hermes-agent) (https://github.com/nousresearch/hermes-agent).*
 
-**原项目 / Original:** MIT License © 2025 Nous Research  
+**原项目 / Original:** [NousResearch/hermes-agent](https://github.com/nousresearch/hermes-agent) · MIT License © 2025 Nous Research  
 **本修改版 / This fork:** GNU Affero General Public License v3.0 (AGPL-3.0)
 
 - ✅ 个人学习、研究可自由使用 / Free for personal & research use
