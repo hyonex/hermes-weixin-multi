@@ -2873,7 +2873,7 @@ async def send_weixin_direct(
         }
 
     async with aiohttp.ClientSession(trust_env=True, connector=_make_ssl_connector()) as session:
-        adapter = WeixinAdapter(
+        adapter = WeixinMultiAdapter(
             PlatformConfig(
                 enabled=True,
                 token=resolved_token,
@@ -2885,12 +2885,15 @@ async def send_weixin_direct(
                 },
             )
         )
-        adapter._send_session = session
+        adapter._send_sessions[account_id] = session
         adapter._session = session
-        adapter._token = resolved_token
         adapter._account_id = account_id
-        adapter._base_url = base_url
-        adapter._cdn_base_url = cdn_base_url
+        adapter._accounts[account_id] = {
+            "token": resolved_token,
+            "base_url": base_url,
+            "cdn_base_url": cdn_base_url,
+        }
+        adapter._chat_to_account[chat_id] = account_id
         adapter._token_store = token_store
 
         last_result: Optional[SendResult] = None
