@@ -200,11 +200,12 @@ hermes gateway restart
 本项目基于 [Hermes Agent](https://github.com/nousresearch/hermes-agent) 的 weixin.py 修改而来。
 
 **原项目：** MIT License © 2025 Nous Research  
-**本修改版：** 基于 MIT，附加非商业条款：
+**本修改版：** GNU Affero General Public License v3.0 (AGPL-3.0)
 
 - ✅ 个人学习、研究、非营利组织可自由使用
-- ❌ 商用需获得原作者书面授权
-- 📝 引用或再分发需注明来源
+- ✅ 修改后的代码**必须开源**（AGPL 要求）
+- ✅ 引用或再分发需注明来源
+- ❌ 商业使用需谨慎（AGPL 具有传染性，详见许可协议）
 
 详见 [LICENSE](LICENSE) 文件。
 
