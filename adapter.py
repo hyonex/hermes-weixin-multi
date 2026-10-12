@@ -146,21 +146,65 @@ def _list_accounts() -> list:
     accounts = []
     if os.path.isdir(accounts_dir):
         for f in sorted(os.listdir(accounts_dir)):
-            # Only match actual account files: wechat-N.json
-            if f.endswith(".json") and f.startswith("wechat-") and not "." in f[:-5]:
-                account_id = f.replace(".json", "")
-                path = os.path.join(accounts_dir, f)
-                try:
-                    with open(path) as fh:
-                        data = json.load(fh)
-                    accounts.append({
-                        "id": account_id,
-                        "token": data.get("token", ""),
-                        "base_url": data.get("base_url", ""),
-                    })
-                except Exception:
-                    accounts.append({"id": account_id, "token": "???", "base_url": ""})
+            # Account files are ``<account_id>.json``, where the id is the iLink bot id
+            # (e.g. ``59ac50009909@im.bot``). Skip the per-account sidecar state files
+            # (``<id>.context-tokens.json`` / ``<id>.sync.json``).
+            if not f.endswith(".json") or f.endswith((".context-tokens.json", ".sync.json")):
+                continue
+            if f == "account_counter.json":
+                continue
+            account_id = f[: -len(".json")]
+            path = os.path.join(accounts_dir, f)
+            try:
+                with open(path) as fh:
+                    data = json.load(fh)
+                accounts.append({
+                    "id": account_id,
+                    "token": data.get("token", ""),
+                    "base_url": data.get("base_url", ""),
+                    "name": data.get("name", ""),
+                })
+            except Exception:
+                accounts.append({"id": account_id, "token": "???", "base_url": "", "name": ""})
     return accounts
+
+
+def _configured_account_names() -> dict:
+    """Display names per account id, from
+    ``gateway.platforms.weixin_multi.extra.accounts.<account_id>.name``.
+
+    Purely cosmetic: the adapter keys accounts on the real iLink bot id, so this map only
+    feeds human-readable labels. Never raises — a missing/broken config yields ``{}``.
+
+    ``pyyaml`` is not a Hermes runtime dependency, so read through Hermes' own config
+    loader instead of parsing config.yaml directly.
+    """
+    extra = {}
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+        platform_cfg = ((cfg.get("gateway") or {}).get("platforms") or {}).get("weixin_multi") or {}
+        extra = platform_cfg.get("extra") or {}
+    except Exception:
+        try:
+            from gateway.config import Platform, load_gateway_config
+
+            extra = load_gateway_config().platforms[Platform("weixin_multi")].extra or {}
+        except Exception:
+            return {}
+
+    configured = extra.get("accounts")
+    if not isinstance(configured, dict):
+        return {}
+    names = {}
+    for account_id, account_data in configured.items():
+        if not isinstance(account_data, dict):
+            continue
+        name = str(account_data.get("name") or "").strip()
+        if name:
+            names[str(account_id).strip()] = name
+    return names
 
 # ── Pending QR management ──
 # When /wechat-login is called from WebUI, the QR data is saved to disk.
@@ -315,9 +359,12 @@ def register(ctx):
             return "📱 暂无微信账号。发送 /wechat-login 添加第一个账号。"
 
         lines = ["📱 Weixin Multi 账号列表：\n"]
+        configured_names = _configured_account_names()
         for acc in accounts:
             has_token = "✅" if acc.get("token") and acc["token"] != "???" else "❌"
-            lines.append(f"  {has_token} {acc['id']} — token={'已配置' if has_token == '✅' else '未配置'}")
+            display_name = str(acc.get("name") or "").strip() or configured_names.get(acc["id"], "")
+            label = f"{display_name} — {acc['id']}" if display_name else acc["id"]
+            lines.append(f"  {has_token} {label} — token={'已配置' if has_token == '✅' else '未配置'}")
         lines.append(f"\n共 {len(accounts)} 个账号")
         lines.append("发送 /wechat-login 添加新账号")
         return "\n".join(lines)

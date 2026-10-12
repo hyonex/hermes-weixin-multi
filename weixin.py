@@ -1387,6 +1387,7 @@ class WeixinMultiAdapter(BasePlatformAdapter):
                                 "token": token,
                                 "base_url": base_url,
                                 "cdn_base_url": WEIXIN_CDN_BASE_URL,
+                                "name": str(data.get("name") or "").strip(),
                             }
                             self._token_store.restore(acc_id)
                     except (json.JSONDecodeError, IOError):
@@ -1410,10 +1411,12 @@ class WeixinMultiAdapter(BasePlatformAdapter):
                         token = str(persisted.get("token") or "").strip()
                         base_url = str(persisted.get("base_url") or base_url).strip().rstrip("/")
                 if token:
+                    prev_name = str((self._accounts.get(acc_id) or {}).get("name") or "").strip()
                     self._accounts[acc_id] = {
                         "token": token,
                         "base_url": base_url,
                         "cdn_base_url": cdn_base_url,
+                        "name": str(acc_data.get("name") or prev_name).strip(),
                     }
                     self._token_store.restore(acc_id)
 
@@ -1813,6 +1816,15 @@ class WeixinMultiAdapter(BasePlatformAdapter):
             if not text and not media_paths:
                 return
 
+            # Record chat→account mapping BEFORE the command branches below.
+            # Both command handlers reply through _send_reply(), and send_message()
+            # resolves the account the same way — via _chat_to_account, falling back
+            # to self._account_id (the first account on disk). Because the command
+            # branches used to return before this line, a first /wechat-list or
+            # /wechat-login from any non-primary account was answered from the
+            # primary account instead, so the user saw no reply in their own chat.
+            self._chat_to_account[effective_chat_id] = account_id
+
             # ---- Multi-account commands ----
             if text and text.strip().lower() == "/wechat-list":
                 asyncio.create_task(self._cmd_wechat_list(effective_chat_id, account_id, context_token))
@@ -1821,9 +1833,6 @@ class WeixinMultiAdapter(BasePlatformAdapter):
                 asyncio.create_task(self._cmd_wechat_login(effective_chat_id, account_id, context_token))
                 return
             # ---- End commands ----
-
-            # Record chat→account mapping for replies
-            self._chat_to_account[effective_chat_id] = account_id
 
             source = self.build_source(
                 chat_id=effective_chat_id,
@@ -1923,7 +1932,9 @@ class WeixinMultiAdapter(BasePlatformAdapter):
                 poll_running = acc_id in self._poll_tasks and not self._poll_tasks[acc_id].done()
                 status_icon = "✅" if poll_running else "❌"
                 status_text = "在线" if poll_running else "离线"
-                lines.append(f"  {status_icon} {acc_id} ({status_text})")
+                display_name = str(acc_state.get("name") or "").strip()
+                label = f"{display_name} — {acc_id}" if display_name else acc_id
+                lines.append(f"  {status_icon} {label} ({status_text})")
 
         lines.append(f"\n共 {len(self._accounts)} 个账号")
         lines.append("\n发送 /wechat-login 添加新账号")
